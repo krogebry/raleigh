@@ -1,0 +1,18 @@
+image:
+  name: hashicorp/terraform:light
+  entrypoint:
+    - '/usr/bin/env'
+    - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+
+stages:
+  - verify
+  - init
+  - validate
+  - plan
+  - apply
+
+variables:
+  TF_PLAN_FILE: "${CI_COMMIT_REF_SLUG}.plan}"
+
+

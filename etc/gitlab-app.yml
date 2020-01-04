@@ -1,0 +1,115 @@
+init aws {{ app_name }} {{ workspace_name }}:
+  only:
+    refs:
+      - merge_requests
+      - master
+    changes:
+      - .gitlab-ci.yml
+      - aws/environments/{{ app_name }}/*
+  stage: init
+  script:
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | base64 -d | tr -d '\r' | ssh-add - > /dev/null
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+    - echo "Initializing working directory for {{ app_name }}"
+    - cd aws/environments/{{ app_name }}
+    - rm -rf .terraform
+    - terraform init
+  artifacts:
+    paths:
+      - aws/environments/{{ app_name }}/.terraform
+
+validate aws {{ app_name }} {{ workspace_name }}:
+  dependencies: ["init aws {{ app_name }} {{ workspace_name }}"]
+  needs: ["init aws {{ app_name }} {{ workspace_name }}"]
+  only:
+    refs:
+      - merge_requests
+      - master
+    changes:
+      - .gitlab-ci.yml
+      - aws/environments/us-east-1/operations
+  stage: validate
+  script:
+    - echo "running terraform validate for {{ app_name }}"
+    - cd aws/environments/{{ app_name }}
+    - terraform workspace select {{ workspace_name }}
+    - terraform validate
+
+review aws {{ app_name }} {{ workspace_name }}:
+  stage: plan
+  dependencies: ["init aws {{ app_name }} {{ workspace_name }}"]
+  needs:
+    - init aws {{ app_name }} {{ workspace_name }}
+    - validate aws {{ app_name }} {{ workspace_name }}
+  only:
+    refs:
+      - merge_requests
+    changes:
+      - .gitlab-ci.yml
+      - aws/environments/us-east-1/operations/**
+  script:
+    - echo "Review plan for {{ app_name }} - {{ workspace_name }}"
+    - cd aws/environments/{{ app_name }}
+    - terraform workspace select {{ workspace_name }}
+    - terraform plan -input=false -out=bin_plan.txt
+    - echo "# {{ app_name }} - {{ workspace_name }}" > plan.txt
+    - echo \`\`\`diff >> plan.txt
+    - terraform show -no-color bin_plan.txt | tee -a plan.txt
+    - echo \`\`\` >> plan.txt
+    - sed -i -e 's/  +/+/g' plan.txt
+    - sed -i -e 's/  ~/~/g' plan.txt
+    - sed -i -e 's/  -/-/g' plan.txt
+    - PLAN=$(cat plan.txt)
+    - apk add --update curl
+    - >-
+      curl -X POST -g -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}"
+      --data-urlencode "body=${PLAN}"
+      "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/discussions"
+
+plan aws {{ app_name }} {{ workspace_name }}:
+  stage: plan
+  dependencies: ["init aws {{ app_name }} {{ workspace_name }}"]
+  needs:
+    - init aws {{ app_name }} {{ workspace_name }}
+    - validate aws {{ app_name }} {{ workspace_name }}
+  only:
+    changes:
+      - .gitlab-ci.yml
+      - aws/environments/{{ app_name }}/**
+    refs:
+      - master
+  script:
+    - echo "Merge planning for {{ app_name }} {{ workspace_name }}"
+    - cd aws/environments/{{ app_name }}
+    - terraform workspace select {{ workspace_name }}
+    - terraform plan -input=false -out=${TF_PLAN_FILE}
+  artifacts:
+    paths:
+      - aws/environments/{{ app_name }}/${TF_PLAN_FILE}
+
+apply aws {{ app_name }} {{ workspace_name }}:
+  stage: apply
+  dependencies:
+    - init aws {{ app_name }} {{ workspace_name }}
+    - plan aws {{ app_name }} {{ workspace_name }}
+  needs:
+    - init aws {{ app_name }} {{ workspace_name }}
+    - plan aws {{ app_name }} {{ workspace_name }}
+  only:
+    refs:
+      - master
+    changes:
+      - .gitlab-ci.yml
+      - aws/environments/{{ app_name }}/**
+  when: manual
+  script:
+    - echo "Applying tf for {{ app_name }}-{{ workspace_name }}"
+    - cd aws/environments/{{ app_name }}
+    - terraform workspace select {{ workspace_name }}
+    - terraform apply -input=false ${TF_PLAN_FILE}
+
+
